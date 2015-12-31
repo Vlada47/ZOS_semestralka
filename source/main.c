@@ -2,11 +2,13 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <string.h>
+#include <math.h>
 
 #include "structures.h"
 
 
-char* file_path; //string with path to the file
+char* input_file_path; //string with path to the input file
+char* output_file_path; //string with path to the output file
 uint32_t threads_cnt; //maximum number of workers that will be created to do stuff
 
 boot_record* br; //structure for storing Boot Record in the memory
@@ -14,20 +16,23 @@ uint32_t** fat_tables; //structure for storing FAT tables in the memory
 root_directory** rd_list; //structure for storing individual Root Directories in the memory
 char** clusters; //strucure for storing clusters with their content in the memory
 
+uint32_t** defrag_indexes; //structure for saving indexes of individial clusters that will be used for defragmenation
+
 /*
 Function for checking parameters given to the program.
 It controls correct number of arguments and whether the value for number of threads
 is numerical and greater than zero.
 */
 void check_arguments(int argc, char** argv) {
-	if(argc != 3) {
-		printf("Program needs to be given 2 parameters - path to the file and number of available threads.\n");
+	if(argc != 4) {
+		printf("Program needs to be given 3 parameters - path to the input file, output file and number of available threads.\n");
 		exit(EXIT_FAILURE);
 	}
 	else {
-		file_path = argv[1];
+		input_file_path = argv[1];
+		output_file_path = argv[2];
 		
-		if((threads_cnt = atoi(argv[2])) <= 0) {
+		if((threads_cnt = atoi(argv[3])) <= 0) {
 			printf("You have to pass positive integer value as the number of available threads.\n");
 			exit(EXIT_FAILURE);
 		}
@@ -75,6 +80,43 @@ void load_file(char* file) {
 	else {
 		printf("Can't open the file %s.\n", file);
 		exit(EXIT_FAILURE);
+	}
+}
+
+/*
+Function for saving content (after needed operations) into file.
+It will be in the same structure as file that was read from.
+*/
+int save_file(char* file) {
+	int i;
+	FILE *fat_file;
+	
+	if((fat_file = fopen(file, "wb"))) {
+		
+		//saving Boot Record
+		fwrite(br, sizeof(boot_record), 1, fat_file);
+		
+		//saving FAT tables
+		for(i = 0; i < br->fat_copies; i++) {
+			fwrite(fat_tables[i] , sizeof(uint32_t), br->cluster_count, fat_file);
+		}
+		
+		//saving Root Directories
+		for(i = 0; i < br->root_directory_max_entries_count; i++) {
+			fwrite(rd_list[i], sizeof(root_directory), 1, fat_file);
+		}
+		
+		//saving clusters
+		for(i = 0; i < br->cluster_count; i++) {
+			fwrite(clusters[i], br->cluster_size, 1, fat_file);
+		}
+		
+		fclose(fat_file);
+		return 0;
+	}
+	else {
+		printf("Can't open the file %s.\n", file);
+		return 1;
 	}
 }
 
@@ -169,16 +211,89 @@ void clear_structures() {
 	free(br);
 }
 
+/*
+Function that checks for lenght of a file described in root_directory given as an input parameterer.
+It first calculates expected number of slusters from file_size variable in root_direcotry and cluster_size
+from boot_record. Then it loops through FAT table checking indexes of clusters belonging to the file
+(starting at first_cluster index from root_directory) and increments real_cluster_count variable.
+If real and expected number of clusters are equal, then function returns 0, otherwise 1.
+*/
+int check_file_size(root_directory* rd) {
+	long exp_cluster_count, real_cluster_count;
+	int cluster_index;
+	
+	exp_cluster_count = ceil ((double) rd->file_size / (double) br->cluster_size);
+	real_cluster_count = 1;
+	cluster_index = fat_tables[0][rd->first_cluster];
+	
+	while(cluster_index != FAT_FILE_END) {
+		cluster_index = fat_tables[0][cluster_index];
+		real_cluster_count++;
+	}
+	
+	if(exp_cluster_count == real_cluster_count) {
+		printf("File %s has correct length of %ld clusters.\n", rd->file_name, real_cluster_count);
+		return 0;
+	}
+	else {
+		printf("File %s has incorrect length. Was expecting %ld clusters, but it had %ld clusters.\n", rd->file_name, exp_cluster_count, real_cluster_count);
+		return 1;
+	}
+}
+
+/*
+Function for creating a list with indexes that will be used for moving content of clusters.
+It basically denotes, which clusters of what files will be moved where. 
+*/
+void prepare_fat_tables_for_defrag() {
+	int i, j;
+	long file_cluster_count;
+	int cluster_index;
+	
+	
+	defrag_indexes = malloc(sizeof(uint32_t) * br->root_directory_max_entries_count);
+	cluster_index = 0;
+	
+	for(i = 0; i < br->root_directory_max_entries_count; i++) {
+		file_cluster_count =  ceil((double) rd_list[i]->file_size / (double) br->cluster_size);
+		defrag_indexes[i] = malloc(sizeof(uint32_t) * file_cluster_count);
+		
+		for(j = 0; j < file_cluster_count; j++) {
+			defrag_indexes[i][j] = cluster_index;
+			cluster_index++;
+		}
+	}
+}
+
 int main(int argc, char** argv){
+	long i;
+	int bad_file_size_cnt;
+	printf("\n");
 	
 	check_arguments(argc, argv);
 	printf("Arguments OK.\n");
+	printf("\n");
 	
-	load_file(file_path);
+	load_file(input_file_path);
 	printf("File loaded into memory.\n");
+	printf("\n");
 	
 	print_structures();
 	printf("End of contents.\n");
+	printf("\n");
+	
+	for(i = 0; i < br->root_directory_max_entries_count; i++) {
+		bad_file_size_cnt += check_file_size(rd_list[i]);
+	}
+	printf("\n");
+	
+	if((save_file(output_file_path) == 0)) {
+		printf("File was successfully saved.\n");
+	}
+	else {
+		printf("File couldn't be saved.\n");
+	}
+	printf("\n");
 	
 	clear_structures();
 	printf("Memory cleared.\n");
