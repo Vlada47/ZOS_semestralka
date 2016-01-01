@@ -3,20 +3,12 @@
 #include <unistd.h>
 #include <string.h>
 #include <math.h>
+#include <pthread.h>
 
 #include "structures.h"
+#include "worker.h"
 
-
-char* input_file_path; //string with path to the input file
-char* output_file_path; //string with path to the output file
-uint32_t threads_cnt; //maximum number of workers that will be created to do stuff
-
-boot_record* br; //structure for storing Boot Record in the memory
-uint32_t** fat_tables; //structure for storing FAT tables in the memory
-root_directory** rd_list; //structure for storing individual Root Directories in the memory
-char** clusters; //strucure for storing clusters with their content in the memory
-
-uint32_t** defrag_indexes; //structure for saving indexes of individial clusters that will be used for defragmenation
+pthread_mutex_t get_job_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /*
 Function for checking parameters given to the program.
@@ -46,7 +38,7 @@ so we know how many of what structures we will need to allocate memory for.
 If file can't be opened, function exits the program with EXIT_FAILURE code.
 */
 void load_file(char* file) {
-	int i;
+	uint32_t i;
 	FILE *fat_file;
 	
 	if((fat_file = fopen(file, "rb"))) {
@@ -88,7 +80,7 @@ Function for saving content (after needed operations) into file.
 It will be in the same structure as file that was read from.
 */
 int save_file(char* file) {
-	int i;
+	uint32_t i;
 	FILE *fat_file;
 	
 	if((fat_file = fopen(file, "wb"))) {
@@ -125,7 +117,7 @@ This function prints the content of structures for storing content of the file.
 It shouldn't be used before the file was loaded in those structures.
 */
 void print_structures() {
-	int i, j;
+	uint32_t i, j;
 	//printing Boot Record
 	printf("-------------------------------------------------------- \n");
     printf("BOOT RECORD \n");
@@ -144,7 +136,7 @@ void print_structures() {
     printf("FAT \n");
     printf("-------------------------------------------------------- \n");
 	for(i = 0; i < br->fat_copies; i++) {
-		printf("\nFAT KOPIE %d\n", i + 1);
+		printf("\nFAT COPIES %d\n", i + 1);
 		
 		for(j = 0; j < br->cluster_count; j++) {
 			if (fat_tables[i][j] != FAT_UNUSED){
@@ -187,7 +179,7 @@ Function for clearing the content of global structures.
 It should be used at the end of the program.
 */
 void clear_structures() {
-	int i;
+	uint32_t i;
 	
 	//clearing clusters
 	for(i = 0; i < br->cluster_count; i++) {
@@ -212,62 +204,53 @@ void clear_structures() {
 }
 
 /*
-Function that checks for lenght of a file described in root_directory given as an input parameterer.
-It first calculates expected number of slusters from file_size variable in root_direcotry and cluster_size
-from boot_record. Then it loops through FAT table checking indexes of clusters belonging to the file
-(starting at first_cluster index from root_directory) and increments real_cluster_count variable.
-If real and expected number of clusters are equal, then function returns 0, otherwise 1.
-*/
-int check_file_size(root_directory* rd) {
-	long exp_cluster_count, real_cluster_count;
-	int cluster_index;
-	
-	exp_cluster_count = ceil ((double) rd->file_size / (double) br->cluster_size);
-	real_cluster_count = 1;
-	cluster_index = fat_tables[0][rd->first_cluster];
-	
-	while(cluster_index != FAT_FILE_END) {
-		cluster_index = fat_tables[0][cluster_index];
-		real_cluster_count++;
-	}
-	
-	if(exp_cluster_count == real_cluster_count) {
-		printf("File %s has correct length of %ld clusters.\n", rd->file_name, real_cluster_count);
-		return 0;
-	}
-	else {
-		printf("File %s has incorrect length. Was expecting %ld clusters, but it had %ld clusters.\n", rd->file_name, exp_cluster_count, real_cluster_count);
-		return 1;
-	}
-}
-
-/*
-Function for creating a list with indexes that will be used for moving content of clusters.
-It basically denotes, which clusters of what files will be moved where. 
+Function for creating a list with indexes that will be used for moving content of files.
+It basically denotes, which clusters will be used as first clusters of individual files (one index per file/Root Directory). 
 */
 void prepare_fat_tables_for_defrag() {
-	int i, j;
-	long file_cluster_count;
-	int cluster_index;
-	
+	uint32_t i, j;
+	uint64_t file_cluster_count;
+	uint32_t cluster_index;
 	
 	defrag_indexes = malloc(sizeof(uint32_t) * br->root_directory_max_entries_count);
 	cluster_index = 0;
 	
 	for(i = 0; i < br->root_directory_max_entries_count; i++) {
 		file_cluster_count =  ceil((double) rd_list[i]->file_size / (double) br->cluster_size);
-		defrag_indexes[i] = malloc(sizeof(uint32_t) * file_cluster_count);
-		
-		for(j = 0; j < file_cluster_count; j++) {
-			defrag_indexes[i][j] = cluster_index;
-			cluster_index++;
-		}
+		defrag_indexes[i] = cluster_index;
+		cluster_index += file_cluster_count;
 	}
 }
 
+void initiate_worker_job(void *(*job_func)(), uint32_t thread_number) {
+	worker my_workers[thread_number];
+	pthread_t my_threads[thread_number];
+	uint32_t i;
+	
+	for(i = 0; i < thread_number; i++) {
+		my_workers[i].worker_id = i;
+		pthread_create(&(my_threads[i]), NULL, job_func, (void *)(&my_workers[i]));
+	}
+}
+
+uint32_t get_next_job(worker* w) {
+	pthread_mutex_lock(&get_job_mutex);
+	
+	if(processed_files < br->root_directory_max_entries_count) {
+		add_new_job(w, rd_list[processed_files], defrag_indexes[processed_files]);
+		processed_files++;
+		pthread_mutex_unlock(&get_job_mutex);
+		return job_type;
+	}
+	else {
+		pthread_mutex_unlock(&get_job_mutex);
+		return GO_HOME;
+	}
+} 
+
 int main(int argc, char** argv){
-	long i;
-	int bad_file_size_cnt;
+	uint64_t i;
+	
 	printf("\n");
 	
 	check_arguments(argc, argv);
@@ -282,10 +265,9 @@ int main(int argc, char** argv){
 	printf("End of contents.\n");
 	printf("\n");
 	
-	for(i = 0; i < br->root_directory_max_entries_count; i++) {
-		bad_file_size_cnt += check_file_size(rd_list[i]);
-	}
-	printf("\n");
+	processed_files = 0;
+	
+	//work of threads
 	
 	if((save_file(output_file_path) == 0)) {
 		printf("File was successfully saved.\n");
@@ -297,6 +279,6 @@ int main(int argc, char** argv){
 	
 	clear_structures();
 	printf("Memory cleared.\n");
-	
+
 	return 0;
 }
