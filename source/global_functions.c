@@ -1,7 +1,8 @@
 #include <stdlib.h>
 #include <stdio.h>
-#include <unistd.h>
+#include <stdint.h>
 #include <string.h>
+#include <math.h>
 
 #include "structures.h"
 #include "global_functions.h"
@@ -196,7 +197,7 @@ void prepare_fat_tables_for_defrag() {
 		file_cluster_count =  ceil((double) rd_list[i]->file_size / (double) br->cluster_size);
 		
 		for(j = cluster_index; j < (cluster_index + file_cluster_count); j++) {
-			if(clusters[j] == FAT_BAD_CLUSTER) {
+			if(fat_tables[0][j] == FAT_BAD_CLUSTER) {
 				cluster_index = j + 1;
 				j = cluster_index - 1;
 			}

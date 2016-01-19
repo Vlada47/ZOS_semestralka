@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -I ./headers/ -lm -lpthread -Wall -O3
+CFLAGS = -I ./headers/ -lm -lpthread -Wall -fno-omit-frame-pointer -g
 BIN = FAT_Defragmentator
 OBJ = source/main.o source/global_functions.o source/worker_functions.o
 

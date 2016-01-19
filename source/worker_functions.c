@@ -1,18 +1,19 @@
 #include <stdlib.h>
 #include <stdio.h>
-#include <unistd.h>
-#include <string.h>
+#include <stdint.h>
 #include <pthread.h>
+#include <sched.h>
+#include <math.h>
 
 #include "structures.h"
 #include "worker_functions.h"
 
-void* do_work(uint32_t current_job) {
-	uint64_t my_job;
+void* do_work(void* current_job) {
+	uint32_t arg = *(int*)(current_job);
+	int64_t my_job;
 	
 	suspend_cluster* s_cluster_start = (suspend_cluster*) malloc(sizeof(suspend_cluster));
 	suspend_cluster* s_cluster_end = s_cluster_start;
-	suspend_cluster* s_cluster_defrag;
 	
 	s_cluster_start->cluster_content = "\n";
 	s_cluster_start->target_index = -1;
@@ -20,7 +21,7 @@ void* do_work(uint32_t current_job) {
 	s_cluster_start->next = NULL;
 	
 	while((my_job = get_job()) >= 0) {
-		switch(current_job) {
+		switch(arg) {
 			case CHECK_FILE_SIZE_JOB:
 				increment_bad_file_size_sum(size_check_func(rd_list[my_job]));
 				break;
@@ -35,11 +36,13 @@ void* do_work(uint32_t current_job) {
 	}
 	
 	clear_suspended_cluster_list(s_cluster_start);
+	
+	return NULL;
 }
 
 
-uint64_t get_job() {
-	uint64_t file_id;
+int64_t get_job() {
+	int64_t file_id;
 	pthread_mutex_lock(&get_job_mutex);
 	
 	if(processed_files < br->root_directory_max_entries_count) {
@@ -91,22 +94,31 @@ suspend_cluster* defragment_func(root_directory* rd, uint32_t start_index, suspe
 	uint32_t curr_index;
 	uint32_t next_index;
 	uint64_t cluster_count;
+	uint64_t source_cluster_mutex;
+	uint64_t target_cluster_mutex;
+	char* tmp_cluster;
 	
 	curr_index = rd->first_cluster;
+	rd->first_cluster = start_index;
 	cluster_count = ceil ((double) rd->file_size / (double) br->cluster_size);
 	
 	for(i = 0; i < cluster_count; i++) {
+		source_cluster_mutex = (curr_index / br->cluster_count) * CLUSTER_MUTEX_CNT;
+		target_cluster_mutex = ((start_index + i) / br->cluster_count) * CLUSTER_MUTEX_CNT;
+		
 		//locked
-		if(((start_index + i) % CLUSTER_MUTEX_CNT) == (curr_index % CLUSTER_MUTEX_CNT)) {
-			pthread_mutex_lock(&(cluster_mutex_array[curr_index % CLUSTER_MUTEX_CNT]));
+		if(target_cluster_mutex == source_cluster_mutex) {
+			pthread_mutex_lock(&(cluster_mutex_array[source_cluster_mutex]));
 		}
 		else {
-			pthread_mutex_lock(&(cluster_mutex_array[curr_index % CLUSTER_MUTEX_CNT]));
-			pthread_mutex_lock(&(cluster_mutex_array[(start_index + i) % CLUSTER_MUTEX_CNT]));
+			pthread_mutex_lock(&(cluster_mutex_array[source_cluster_mutex]));
+			pthread_mutex_lock(&(cluster_mutex_array[target_cluster_mutex]));
 		}
 		
 		if(fat_tables[0][start_index + i] == FAT_UNUSED) {
+			tmp_cluster = clusters[start_index + i];
 			clusters[start_index + i] = clusters[curr_index];
+			clusters[curr_index] = tmp_cluster;
 			
 			next_index = fat_tables[0][curr_index];
 			
@@ -124,7 +136,8 @@ suspend_cluster* defragment_func(root_directory* rd, uint32_t start_index, suspe
 		else {
 			s_cluster->next = (suspend_cluster*) malloc(sizeof(suspend_cluster));
 			s_cluster = s_cluster->next;
-			s_cluster->cluster_content = clusters[curr_index];
+			s_cluster->cluster_content = malloc(br->cluster_size);
+			memcpy(s_cluster->cluster_content, clusters[curr_index], br->cluster_size);
 			s_cluster->target_index = start_index + i;
 			s_cluster->next = NULL;
 			
@@ -142,12 +155,12 @@ suspend_cluster* defragment_func(root_directory* rd, uint32_t start_index, suspe
 			}
 		}
 		
-		if(((start_index + i) % CLUSTER_MUTEX_CNT) == (curr_index % CLUSTER_MUTEX_CNT)) {
-			pthread_mutex_unlock(&(cluster_mutex_array[curr_index % CLUSTER_MUTEX_CNT]));
+		if(target_cluster_mutex == source_cluster_mutex) {
+			pthread_mutex_unlock(&(cluster_mutex_array[source_cluster_mutex]));
 		}
 		else {
-			pthread_mutex_unlock(&(cluster_mutex_array[curr_index % CLUSTER_MUTEX_CNT]));
-			pthread_mutex_unlock(&(cluster_mutex_array[(start_index + i) % CLUSTER_MUTEX_CNT]));
+			pthread_mutex_unlock(&(cluster_mutex_array[source_cluster_mutex]));
+			pthread_mutex_unlock(&(cluster_mutex_array[target_cluster_mutex]));
 		}
 		//unlocked
 		
@@ -160,24 +173,27 @@ suspend_cluster* defragment_func(root_directory* rd, uint32_t start_index, suspe
 
 void defragment_suspended_func(suspend_cluster* s_cluster_start) {
 	uint32_t i;
-	suspend_cluster* s_cluster_curr = s_cluster_start;
+	suspend_cluster* s_cluster_curr = s_cluster_start->next;
+	uint64_t target_cluster_mutex;
 	
 	while(s_cluster_curr != NULL) {
 		
 		while(!(cluster_unused(s_cluster_curr->target_index))) {
-			pthread_yield();
+			sched_yield();
 		}
+		target_cluster_mutex = (s_cluster_curr->target_index / br->cluster_count) * CLUSTER_MUTEX_CNT;
 		
 		//locked
-		pthread_mutex_lock(&(cluster_mutex_array[s_cluster_curr->target_index % CLUSTER_MUTEX_CNT]));
+		pthread_mutex_lock(&(cluster_mutex_array[target_cluster_mutex]));
 		
-		clusters[s_cluster_curr->target_index] = s_cluster_curr->cluster_content;
+		memcpy(clusters[s_cluster_curr->target_index], s_cluster_curr->cluster_content, br->cluster_size);
+		free(s_cluster_curr->cluster_content);
 		
 		for(i = 0; i < br->fat_copies; i++) {
 			fat_tables[i][s_cluster_curr->target_index] = s_cluster_curr->target_index_next;
 		}
 		
-		pthread_mutex_unlock(&(cluster_mutex_array[s_cluster_curr->target_index % CLUSTER_MUTEX_CNT]));
+		pthread_mutex_unlock(&(cluster_mutex_array[target_cluster_mutex]));
 		//unlocked
 		
 		s_cluster_curr = s_cluster_curr->next;
@@ -187,10 +203,11 @@ void defragment_suspended_func(suspend_cluster* s_cluster_start) {
 
 uint32_t cluster_unused(uint32_t cluster_index) {
 	uint32_t x;
+	uint64_t target_cluster_mutex = (cluster_index / br->cluster_count) * CLUSTER_MUTEX_CNT;
 	
-	pthread_mutex_lock(&(cluster_mutex_array[cluster_index % CLUSTER_MUTEX_CNT]));
+	pthread_mutex_lock(&(cluster_mutex_array[target_cluster_mutex]));
 	x = fat_tables[0][cluster_index];
-	pthread_mutex_unlock(&(cluster_mutex_array[cluster_index % CLUSTER_MUTEX_CNT]));
+	pthread_mutex_unlock(&(cluster_mutex_array[target_cluster_mutex]));
 	
 	return (x == FAT_UNUSED);
 }
