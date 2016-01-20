@@ -4,6 +4,7 @@
 #include <pthread.h>
 #include <sched.h>
 #include <math.h>
+#include <string.h>
 
 #include "structures.h"
 #include "worker_functions.h"
@@ -71,7 +72,7 @@ uint32_t size_check_func(root_directory* rd) {
 		real_cluster_count++;
 	}
 	
-	if(cluster_index == FAT_FILE_END) {
+	if((cluster_index == FAT_FILE_END) && (real_cluster_count == exp_cluster_count)) {
 		printf("File %s has correct size.\n", rd->file_name);
 		return 0;
 	}

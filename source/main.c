@@ -26,6 +26,7 @@ pthread_mutex_t get_job_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t bad_file_size_sum_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t cluster_mutex_array[CLUSTER_MUTEX_CNT];
 
+
 int main(int argc, char** argv){
 	uint32_t i;
 	uint32_t job_type;
@@ -72,7 +73,7 @@ int main(int argc, char** argv){
 		printf("\n");
 	}
 	else {
-		printf("All files has correct size. Continuing with defragmentation task...\n");
+		printf("All files have correct size. Continuing with defragmentation task...\n");
 		printf("\n");
 		
 		//initialize mutex array for locking clusters
@@ -95,6 +96,9 @@ int main(int argc, char** argv){
 		for(i = 0; i < threads_cnt; i++) {
 			pthread_join(worker_threads[i], NULL);
 		}
+		
+		//clearing first indexes of files used for defragmentation
+		free(defrag_indexes);
 	}
 	
 	/*//printing of loaded structures for control

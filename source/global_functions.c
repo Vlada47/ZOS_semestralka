@@ -17,7 +17,7 @@ void check_arguments(uint32_t argc, char** argv) {
 		output_file_path = argv[2];
 		
 		if((threads_cnt = atoi(argv[3])) <= 0) {
-			printf("You have to pass positive integer value as the number of available threads.\n");
+			printf("You have to pass positive integer value as the number of available threads. Your input: %s.\n", argv[3]);
 			exit(EXIT_FAILURE);
 		}
 	}
@@ -158,9 +158,6 @@ void print_structures() {
 
 void clear_structures() {
 	uint32_t i;
-	
-	//clearing first indexes of files used for defragmentation
-	free(defrag_indexes);
 	
 	//clearing clusters
 	for(i = 0; i < br->cluster_count; i++) {
